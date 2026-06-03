@@ -10,11 +10,14 @@ app.use(express.json({ limit:'10mb' }));
 
 app.get('/', (req, res) => {
   res.json({
-    status:'BSM Affiliate Article Generator running',
-    version:'1.6.0-impact',
-    impact: process.env.IMPACT_ACCOUNT_SID ? 'connected' : 'not configured',
-    serp:   process.env.SERP_API_KEY ? 'connected' : 'not configured',
-    brave:  process.env.BRAVE_API_KEY ? 'connected' : 'not configured'
+    status:   'BSM Affiliate Generator — Full Stack',
+    version:  '2.0.0',
+    apis: {
+      anthropic: process.env.ANTHROPIC_API_KEY ? 'connected' : 'missing',
+      impact:    process.env.IMPACT_ACCOUNT_SID ? 'connected' : 'missing',
+      serp:      process.env.SERP_API_KEY       ? 'connected' : 'missing',
+      brave:     process.env.BRAVE_API_KEY       ? 'connected' : 'missing'
+    }
   });
 });
 
@@ -597,7 +600,13 @@ app.post('/generate', async (req, res) => {
 
     // ── Impact.com: get campaigns first to find best match ──
     const impactCampaigns = await getImpactCampaigns();
-    const bestCampaign = impactCampaigns.campaigns.length > 0 ? impactCampaigns.campaigns[0] : null;
+    // Match campaign by brand name found in keyword or brands setting
+  const kwLower = keyword.toLowerCase();
+  const brandLower = (brands||'').toLowerCase();
+  const bestCampaign = impactCampaigns.campaigns.find(function(c) {
+    const n = (c.brand||c.name||'').toLowerCase();
+    return kwLower.includes(n) || brandLower.includes(n);
+  }) || (impactCampaigns.campaigns.length > 0 ? impactCampaigns.campaigns[0] : null);
 
     // ── All enrichment APIs in parallel ──
     console.log('Running all API lookups for: ' + keyword);
@@ -787,6 +796,41 @@ app.post('/generate', async (req, res) => {
     console.error('Affiliate generator error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+/* ================================================================
+   ENDPOINT: /impact/tracking-link — Generate a real tracking link
+   ================================================================ */
+app.post('/impact/tracking-link', async (req, res) => {
+  try {
+    const { campaignId, url } = req.body;
+    if (!campaignId || !url) return res.status(400).json({ error:'Missing campaignId or url' });
+    const link = await getImpactTrackingLink(campaignId, url);
+    res.json({ trackingLink: link });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ================================================================
+   ENDPOINT: /impact/status — Full account status summary
+   ================================================================ */
+app.get('/impact/status', async (req, res) => {
+  try {
+    const [campaigns, reports] = await Promise.all([
+      getImpactCampaigns(),
+      getImpactReports(30)
+    ]);
+    res.json({
+      connected:       !!getImpactAuth(),
+      totalCampaigns:  campaigns.campaigns.length,
+      campaigns:       campaigns.campaigns.slice(0, 10),
+      performance30d:  reports.report ? {
+        totalRows:    reports.report.rows.length,
+        topCampaigns: reports.report.rows.slice(0, 5),
+        period:       reports.report.start + ' to ' + reports.report.end
+      } : null,
+      source: 'Impact.com'
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.listen(PORT, () => console.log('BSM Affiliate Generator v1.0 running on port ' + PORT));
