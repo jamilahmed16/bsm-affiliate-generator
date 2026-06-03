@@ -9,7 +9,7 @@ app.use(cors({ origin:'*', methods:['POST','GET','OPTIONS'], allowedHeaders:['Co
 app.use(express.json({ limit:'10mb' }));
 
 app.get('/', (req, res) => {
-  res.json({ status:'BSM Affiliate Article Generator running', version:'1.4.0' });
+  res.json({ status:'BSM Affiliate Article Generator running', version:'1.4.1' });
 });
 
 /* ================================================================
@@ -279,7 +279,7 @@ function buildAffiliateHtml(parsed) {
 
   body = disclosure + body;
 
-  return '<!-- BSM Affiliate Content v1.0 -->\n<div class="bsm-affiliate-content">\n'
+  return '<!-- BSM Affiliate Content v1.4 -->\n<div class="bsm-affiliate-content">\n'
     + body + '\n'
     + buildFaqHtml(faq)
     + '\n</div>';
@@ -295,9 +295,9 @@ function parseAffiliateArticle(rawText) {
   const tM = rawText.match(/TITLE:\s*(.+?)(?:\n|$)/);
   const sM = rawText.match(/SLUG:\s*(.+?)(?:\n|$)/);
   const mM = rawText.match(/META:\s*(.+?)(?:\n|$)/);
-  result.title = tM ? tM[1].trim() : '';
-  result.slug  = sM ? sM[1].trim().replace(/[^a-z0-9-]/g,'') : '';
-  result.meta  = mM ? mM[1].trim() : '';
+  result.title = tM ? tM[1].trim().replace(/\*\*/g,'').trim() : '';
+  result.slug  = sM ? sM[1].trim().replace(/\*\*/g,'').replace(/[^a-z0-9-]/g,'') : '';
+  result.meta  = mM ? mM[1].trim().replace(/\*\*/g,'').trim() : '';
 
   const cM = rawText.match(/CONTENT:\s*([\s\S]+)/);
   const content = cM ? cM[1].trim() : rawText;
@@ -311,7 +311,7 @@ function parseAffiliateArticle(rawText) {
       if (aIdx === -1) return;
       let q = chunk.slice(0,aIdx).replace(/\*\*/g,'').replace(/^[:\s]+/,'').trim();
       let a = chunk.slice(aIdx).replace(/^\*\*A:\*\*/i,'').replace(/\*\*Q:[\s\S]*/i,'').replace(/\*\*/g,'').trim().replace(/\n/g,' ').replace(/\s+/g,' ');
-      if (q && a && q.length > 3) result.faq.push({q, a});
+      q = q.replace(/\*\*/g,'').trim(); a = a.replace(/\*\*/g,'').trim(); if (q && a && q.length > 3) result.faq.push({q, a});
     });
   }
 
@@ -346,7 +346,7 @@ function parseAffiliateArticle(rawText) {
     let heading='', text=part;
     if (i > 0) {
       const nl = part.indexOf('\n');
-      if (nl > -1) { heading=part.slice(0,nl).trim(); text=part.slice(nl+1); }
+      if (nl > -1) { heading=part.slice(0,nl).trim().replace(/\*\*/g,''); text=part.slice(nl+1); }
       else { heading=part.trim(); text=''; }
     }
     text = text
@@ -354,7 +354,7 @@ function parseAffiliateArticle(rawText) {
       .replace(/\[INTERNAL:\s*([^\]]+)\]/gi,'<a href="#" style="color:#E8FF00;text-decoration:underline;">$1</a>')
       .replace(/\*\*(.+?)\*\*/g,'<strong style="color:#FFFFFF;font-weight:600;">$1</strong>')
       .replace(/\*(.+?)\*/g,'<em>$1</em>');
-    const paragraphs = text.split(/\n\n+/).map(p=>p.trim()).filter(p=>p&&!p.startsWith('#')&&p.length>20).map(p=>p.replace(/\n/g,' '));
+    const paragraphs = text.split(/\n\n+/).map(p=>p.trim()).filter(p=>p&&!p.startsWith('#')&&p.length>20).map(p=>p.replace(/\n/g,' ').replace(/\*\*/g,''));
     if (paragraphs.length > 0 || heading) result.sections.push({heading, paragraphs});
   });
 
