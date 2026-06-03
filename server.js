@@ -9,7 +9,13 @@ app.use(cors({ origin:'*', methods:['POST','GET','OPTIONS'], allowedHeaders:['Co
 app.use(express.json({ limit:'10mb' }));
 
 app.get('/', (req, res) => {
-  res.json({ status:'BSM Affiliate Article Generator running', version:'1.5.0' });
+  res.json({
+    status:'BSM Affiliate Article Generator running',
+    version:'1.6.0-impact',
+    impact: process.env.IMPACT_ACCOUNT_SID ? 'connected' : 'not configured',
+    serp:   process.env.SERP_API_KEY ? 'connected' : 'not configured',
+    brave:  process.env.BRAVE_API_KEY ? 'connected' : 'not configured'
+  });
 });
 
 /* ================================================================
@@ -205,49 +211,31 @@ function buildComparisonTable(products) {
 }
 
 function buildFaqHtml(faqItems) {
-  if (!faqItems || !faqItems.length) return "";
+  if (!faqItems || !faqItems.length) return '';
   var showItems = faqItems.slice(0, 6);
-
-  // Build HTML items
   var itemsHtml = showItems.map(function(item) {
-    var q = (item.q||"").replace(/\*\*/g,"").trim();
-    var a = (item.a||"").replace(/\*\*/g,"").trim();
-    return [
-      '<div itemscope itemprop="mainEntity" itemtype="https://schema.org/Question" style="border-bottom:1px solid #2E2E2E;">',
-      '<div style="padding:16px 20px;background:#111111;">',
-      '<strong style="font-family:var(--bsm-font-d,sans-serif);font-size:17px;font-weight:700;text-transform:uppercase;color:#E8FF00;display:block;margin-bottom:10px;" itemprop="name">' + escHtml(q) + '</strong>',
-      '<div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">',
-      '<div itemprop="text" style="font-family:serif;font-size:15px;color:#C8C8C8;line-height:1.75;">' + escHtml(a) + '</div>',
-      '</div></div></div>'
-    ].join("");
-  }).join("");
-
-  // JSON-LD schema for Google rich results and AI search
-  var schemaData = {
-    "@context": "https://schema.org",
-    "@type": "FAQPage",
-    "mainEntity": showItems.map(function(item) {
-      return {
-        "@type": "Question",
-        "name": (item.q||"").replace(/\*\*/g,"").trim(),
-        "acceptedAnswer": {
-          "@type": "Answer",
-          "text": (item.a||"").replace(/\*\*/g,"").trim()
-        }
-      };
+    var q = (item.q||'').replace(/\*\*/g,'').trim();
+    var a = (item.a||'').replace(/\*\*/g,'').trim();
+    return '<div itemscope itemprop="mainEntity" itemtype="https://schema.org/Question" style="border-bottom:1px solid #2E2E2E;">'
+      + '<div style="padding:16px 20px;background:#111111;">'
+      + '<strong style="font-size:17px;font-weight:700;text-transform:uppercase;color:#E8FF00;display:block;margin-bottom:10px;" itemprop="name">' + escHtml(q) + '</strong>'
+      + '<div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">'
+      + '<div itemprop="text" style="font-size:15px;color:#C8C8C8;line-height:1.75;">' + escHtml(a) + '</div>'
+      + '</div></div></div>';
+  }).join('');
+  var schema = JSON.stringify({
+    '@context':'https://schema.org','@type':'FAQPage',
+    'mainEntity': showItems.map(function(item) {
+      return {'@type':'Question','name':(item.q||'').replace(/\*\*/g,'').trim(),
+        'acceptedAnswer':{'@type':'Answer','text':(item.a||'').replace(/\*\*/g,'').trim()}};
     })
-  };
-  var jsonLd = '<script type="application/ld+json">' + JSON.stringify(schemaData) + '<\/script>';
-
-  // Speakable schema for voice and AI assistants
-  var speakableData = {
-    "@context": "https://schema.org",
-    "@type": "WebPage",
-    "speakable": { "@type": "SpeakableSpecification", "cssSelector": [".bsm-faq-wrap"] }
-  };
-  var speakable = '<script type="application/ld+json">' + JSON.stringify(speakableData) + '<\/script>';
-
-  return "\n" + jsonLd + speakable
+  });
+  var speakable = JSON.stringify({
+    '@context':'https://schema.org','@type':'WebPage',
+    'speakable':{'@type':'SpeakableSpecification','cssSelector':['.bsm-faq-wrap']}
+  });
+  return '\n<script type="application/ld+json">' + schema + '<\/script>'
+    + '<script type="application/ld+json">' + speakable + '<\/script>'
     + '<div class="bsm-faq-wrap" itemscope itemtype="https://schema.org/FAQPage" style="max-width:720px;margin:40px 0;border:1px solid #2E2E2E;overflow:hidden;">'
     + '<div style="font-size:22px;font-weight:800;text-transform:uppercase;color:#FFFFFF;padding:16px 20px;background:#1A1A1A;border-bottom:2px solid #E8FF00;">Frequently Asked Questions</div>'
     + itemsHtml + '</div>\n';
@@ -371,6 +359,188 @@ function parseAffiliateArticle(rawText) {
 }
 
 /* ================================================================
+   ENRICHMENT APIs — Shopping, News, PAA, Trends, Videos, AI, Amazon
+   All called in parallel via Promise.all for zero extra wait time
+   ================================================================ */
+
+async function getShoppingData(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {products:[],source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=google_shopping&q='+encodeURIComponent(keyword)+'&num=10&gl=us&api_key='+k);
+    if (!r.ok) throw new Error('Shopping '+r.status);
+    const d = await r.json();
+    return {products:(d.shopping_results||[]).slice(0,10).map(function(p){return{title:p.title||'',price:p.price||'',source:p.source||'',rating:p.rating||''};}),source:'Google Shopping'};
+  } catch(e) {console.log('Shopping failed:'+e.message);return {products:[],source:'none'};}
+}
+
+async function getNewsData(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {news:[],source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=google_news&q='+encodeURIComponent(keyword)+'&gl=us&api_key='+k);
+    if (!r.ok) throw new Error('News '+r.status);
+    const d = await r.json();
+    return {news:(d.news_results||[]).slice(0,5).map(function(n){return{title:n.title||'',source:(n.source&&n.source.name)||'',date:n.date||''};}),source:'Google News'};
+  } catch(e) {console.log('News failed:'+e.message);return {news:[],source:'none'};}
+}
+
+async function getPAAData(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {questions:[],relatedSearches:[],source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=google&q='+encodeURIComponent(keyword)+'&gl=us&num=10&api_key='+k);
+    if (!r.ok) throw new Error('PAA '+r.status);
+    const d = await r.json();
+    return {
+      questions:(d.related_questions||[]).slice(0,8).map(function(q){return{question:q.question||'',answer:q.answer||q.snippet||''};}),
+      relatedSearches:(d.related_searches||[]).slice(0,6).map(function(s){return s.query||'';}),
+      source:'Google PAA'
+    };
+  } catch(e) {console.log('PAA failed:'+e.message);return {questions:[],relatedSearches:[],source:'none'};}
+}
+
+async function getTrendsData(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {relatedQueries:[],source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=google_trends&q='+encodeURIComponent(keyword)+'&geo=US&data_type=TIMESERIES&api_key='+k);
+    if (!r.ok) throw new Error('Trends '+r.status);
+    const d = await r.json();
+    return {relatedQueries:((d.related_queries&&d.related_queries.rising)||[]).slice(0,6).map(function(q){return q.query||'';}),source:'Google Trends'};
+  } catch(e) {console.log('Trends failed:'+e.message);return {relatedQueries:[],source:'none'};}
+}
+
+async function getVideosData(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {videos:[],source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=google_videos&q='+encodeURIComponent(keyword+' review 2026')+'&gl=us&api_key='+k);
+    if (!r.ok) throw new Error('Videos '+r.status);
+    const d = await r.json();
+    return {videos:(d.video_results||[]).slice(0,3).map(function(v){return{title:v.title||'',link:v.link||'',channel:v.channel||''};}),source:'Google Videos'};
+  } catch(e) {console.log('Videos failed:'+e.message);return {videos:[],source:'none'};}
+}
+
+async function getAIOverview(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {overview:'',featuredSnippet:'',source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=google&q='+encodeURIComponent(keyword)+'&gl=us&num=5&api_key='+k);
+    if (!r.ok) throw new Error('AIOverview '+r.status);
+    const d = await r.json();
+    return {
+      overview:d.ai_overview?(d.ai_overview.description||d.ai_overview.snippet||'').slice(0,400):'',
+      featuredSnippet:d.answer_box?(d.answer_box.answer||d.answer_box.snippet||''):'',
+      source:'Google AI Overview'
+    };
+  } catch(e) {console.log('AIOverview failed:'+e.message);return {overview:'',featuredSnippet:'',source:'none'};}
+}
+
+async function getAmazonData(keyword) {
+  const k = process.env.SERP_API_KEY;
+  if (!k) return {products:[],source:'none'};
+  try {
+    const r = await fetch('https://serpapi.com/search.json?engine=amazon&k='+encodeURIComponent(keyword)+'&amazon_domain=amazon.com&api_key='+k);
+    if (!r.ok) throw new Error('Amazon '+r.status);
+    const d = await r.json();
+    const results = d.organic_results||d.search_results||[];
+    return {products:results.slice(0,8).map(function(p){return{title:p.title||'',price:p.price&&p.price.raw?p.price.raw:'',rating:p.rating||'',reviews:p.reviews||0,prime:p.is_prime||false};}),source:'Amazon'};
+  } catch(e) {console.log('Amazon failed:'+e.message);return {products:[],source:'none'};}
+}
+
+/* ================================================================
+   IMPACT.COM API — Tracking links, products, campaigns, reports
+   Auth: Basic with AccountSID:AuthToken base64 encoded
+   Scopes: Reports, Campaigns, Ads, Tracking Links, Products
+   ================================================================ */
+
+function getImpactAuth() {
+  const sid   = process.env.IMPACT_ACCOUNT_SID;
+  const token = process.env.IMPACT_AUTH_TOKEN;
+  if (!sid || !token) return null;
+  return 'Basic ' + Buffer.from(sid + ':' + token).toString('base64');
+}
+
+async function getImpactCampaigns() {
+  const auth = getImpactAuth();
+  if (!auth) return {campaigns:[],source:'none'};
+  try {
+    const sid = process.env.IMPACT_ACCOUNT_SID;
+    const r = await fetch('https://api.impact.com/Mediapartners/'+sid+'/Campaigns?PageSize=50&Status=ACTIVE', {
+      headers:{'Authorization':auth,'Accept':'application/json'}
+    });
+    if (!r.ok) throw new Error('Campaigns '+r.status);
+    const d = await r.json();
+    return {
+      campaigns:(d.Campaigns||[]).map(function(c){return{id:c.Id,name:c.Name,brand:c.AdvertiserName,category:c.Category};}),
+      source:'Impact.com'
+    };
+  } catch(e) {console.log('Impact Campaigns failed:'+e.message);return {campaigns:[],source:'none'};}
+}
+
+async function getImpactProducts(campaignId, keyword) {
+  const auth = getImpactAuth();
+  if (!auth||!campaignId) return {products:[],source:'none'};
+  try {
+    const sid = process.env.IMPACT_ACCOUNT_SID;
+    const r = await fetch('https://api.impact.com/Mediapartners/'+sid+'/Catalogs/Products?CampaignId='+campaignId+'&SearchText='+encodeURIComponent(keyword||'')+'&PageSize=10', {
+      headers:{'Authorization':auth,'Accept':'application/json'}
+    });
+    if (!r.ok) throw new Error('Products '+r.status);
+    const d = await r.json();
+    return {
+      products:(d.Products||[]).slice(0,10).map(function(p){
+        return {
+          name:p.Name||'',brand:p.Brand||'',
+          price:p.Price?(''+p.Price):'',
+          salePrice:p.SalePrice?(''+p.SalePrice):'',
+          trackingLink:p.TrackingLink||'#',
+          inStock:p.Availability==='in stock'
+        };
+      }),
+      source:'Impact.com'
+    };
+  } catch(e) {console.log('Impact Products failed:'+e.message);return {products:[],source:'none'};}
+}
+
+async function getImpactAds(campaignId) {
+  const auth = getImpactAuth();
+  if (!auth||!campaignId) return {ads:[],source:'none'};
+  try {
+    const sid = process.env.IMPACT_ACCOUNT_SID;
+    const r = await fetch('https://api.impact.com/Mediapartners/'+sid+'/Ads?CampaignId='+campaignId+'&PageSize=20', {
+      headers:{'Authorization':auth,'Accept':'application/json'}
+    });
+    if (!r.ok) throw new Error('Ads '+r.status);
+    const d = await r.json();
+    return {ads:(d.Ads||[]).slice(0,10).map(function(a){return{id:a.Id,name:a.Name,type:a.Type,trackingLink:a.TrackingLink||''};}),source:'Impact.com'};
+  } catch(e) {console.log('Impact Ads failed:'+e.message);return {ads:[],source:'none'};}
+}
+
+async function getImpactReports(days) {
+  const auth = getImpactAuth();
+  if (!auth) return {report:null,source:'none'};
+  try {
+    const sid   = process.env.IMPACT_ACCOUNT_SID;
+    const end   = new Date().toISOString().split('T')[0];
+    const start = new Date(Date.now()-(days||30)*86400000).toISOString().split('T')[0];
+    const r = await fetch('https://api.impact.com/Mediapartners/'+sid+'/Reports/performance/partner?StartDate='+start+'&EndDate='+end+'&GroupBy=CAMPAIGN', {
+      headers:{'Authorization':auth,'Accept':'application/json'}
+    });
+    if (!r.ok) throw new Error('Reports '+r.status);
+    const d = await r.json();
+    return {
+      report:{
+        rows:(d.Rows||[]).map(function(row){return{campaign:row.CampaignName||'',clicks:row.Clicks||0,conversions:row.Actions||0,revenue:row.Revenue?(''+row.Revenue):'0',commission:row.Payout?(''+row.Payout):'0',cr:row.ActionRate?(row.ActionRate*100).toFixed(2)+'%':'0%'};}),
+        start,end
+      },
+      source:'Impact.com'
+    };
+  } catch(e) {console.log('Impact Reports failed:'+e.message);return {report:null,source:'none'};}
+}
+
+/* ================================================================
    ENDPOINT 1 — /analyse
    Returns SERP analysis for a keyword
    Used by the frontend to show competitor data before generating
@@ -387,6 +557,33 @@ app.post('/analyse', async (req, res) => {
 });
 
 /* ================================================================
+   IMPACT.COM ENDPOINTS
+   ================================================================ */
+app.get('/impact/campaigns', async (req, res) => {
+  try { res.json(await getImpactCampaigns()); } catch(e) { res.status(500).json({error:e.message}); }
+});
+app.post('/impact/products', async (req, res) => {
+  try {
+    const {campaignId,keyword} = req.body;
+    if (!campaignId) return res.status(400).json({error:'Missing campaignId'});
+    res.json(await getImpactProducts(campaignId, keyword||''));
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+app.get('/impact/ads', async (req, res) => {
+  try {
+    const {campaignId} = req.query;
+    if (!campaignId) return res.status(400).json({error:'Missing campaignId'});
+    res.json(await getImpactAds(campaignId));
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+app.get('/impact/reports', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days)||30;
+    res.json(await getImpactReports(days));
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+/* ================================================================
    ENDPOINT 2 — /generate
    Full pipeline: SERP → Claude affiliate article → BSM HTML
    ================================================================ */
@@ -398,9 +595,13 @@ app.post('/generate', async (req, res) => {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error:'API key not set' });
 
-    // ── All API calls in parallel ──
+    // ── Impact.com: get campaigns first to find best match ──
+    const impactCampaigns = await getImpactCampaigns();
+    const bestCampaign = impactCampaigns.campaigns.length > 0 ? impactCampaigns.campaigns[0] : null;
+
+    // ── All enrichment APIs in parallel ──
     console.log('Running all API lookups for: ' + keyword);
-    const [serp, shopping, news, paa, trends, videos, aiOverview, amazon] = await Promise.all([
+    const [serp, shopping, news, paa, trends, videos, aiOverview, amazon, impactProducts] = await Promise.all([
       analyseSERP(keyword),
       getShoppingData(keyword),
       getNewsData(keyword),
@@ -408,8 +609,10 @@ app.post('/generate', async (req, res) => {
       getTrendsData(keyword),
       getVideosData(keyword),
       getAIOverview(keyword),
-      getAmazonData(keyword)
+      getAmazonData(keyword),
+      bestCampaign ? getImpactProducts(bestCampaign.id, keyword) : Promise.resolve({products:[],source:'none'})
     ]);
+    console.log('APIs done: SERP='+serp.resultsCount+' Shop='+shopping.products.length+' News='+news.news.length+' PAA='+paa.questions.length+' Amazon='+amazon.products.length);
 
     // ── Build SEO-informed prompt ──
     const typeMap = {
@@ -435,34 +638,41 @@ app.post('/generate', async (req, res) => {
 
     const brandsCtx = brands ? '\nFEATURED BRANDS: ' + brands : '\nFEATURED BRANDS: Adidas, Nike, Puma, Oakley';
 
-    var shoppingCtx = shopping.products.length > 0
-      ? "\n\nLIVE PRICES FROM GOOGLE SHOPPING (use these exact prices):\n"
-        + shopping.products.map(function(p,i){return (i+1)+". "+p.title+(p.price?" — "+p.price:"")+(p.source?" via "+p.source:"")+(p.rating?" "+p.rating+"★":"");}).join("\n")
-        + "\nIMPORTANT: Use these real prices. Do not invent prices." : "";
+    const shoppingCtx = shopping.products.length > 0
+      ? '\n\nLIVE PRICES FROM GOOGLE SHOPPING (use these exact prices — do not invent prices):\n'
+        + shopping.products.map(function(p,i){return (i+1)+'. '+p.title+(p.price?' — '+p.price:'')+(p.source?' via '+p.source:'')+(p.rating?' '+p.rating+'★':'');}).join('\n') : '';
 
-    var amazonCtx = amazon.products.length > 0
-      ? "\n\nAMAZON BESTSELLERS (use for Amazon Associates links):\n"
-        + amazon.products.map(function(p,i){return (i+1)+". "+p.title+(p.price?" — "+p.price:"")+(p.rating?" "+p.rating+"★":"")+(p.prime?" [Prime]":"");}).join("\n") : "";
+    const amazonCtx = amazon.products.length > 0
+      ? '\n\nAMAZON BESTSELLERS WITH REAL PRICES (use for [AMAZON: Product — Price] placeholders):\n'
+        + amazon.products.map(function(p,i){return (i+1)+'. '+p.title+(p.price?' — '+p.price:'')+(p.rating?' '+p.rating+'★':'')+(p.prime?' [Prime]':'');}).join('\n') : '';
 
-    var newsCtx = news.news.length > 0
-      ? "\n\nLATEST NEWS HOOK (reference 1-2 in your opening):\n"
-        + news.news.map(function(n,i){return (i+1)+". "+n.title+(n.source?" — "+n.source:"")+(n.date?" — "+n.date:"");}).join("\n") : "";
+    const newsCtx = news.news.length > 0
+      ? '\n\nLATEST NEWS HOOK (reference 1-2 of these in your opening to make the article timely):\n'
+        + news.news.map(function(n,i){return (i+1)+'. '+n.title+(n.source?' — '+n.source:'')+(n.date?' — '+n.date:'');}).join('\n') : '';
 
-    var paaCtx = paa.questions.length > 0
-      ? "\n\nPEOPLE ALSO ASK — use these as your 6 FAQ questions EXACTLY as written:\n"
-        + paa.questions.map(function(q,i){return (i+1)+". "+q.question+(q.answer?" (hint: "+q.answer.slice(0,150)+")" : "");}).join("\n")
-        + (paa.relatedSearches.length ? "\nRelated searches (use as LSI): "+paa.relatedSearches.join(", ") : "") : "";
+    const paaCtx = paa.questions.length > 0
+      ? '\n\nPEOPLE ALSO ASK — use these EXACT questions as your 6 FAQ items:\n'
+        + paa.questions.map(function(q,i){return (i+1)+'. '+q.question+(q.answer?' (hint: '+q.answer.slice(0,150)+')':'');}).join('\n')
+        + (paa.relatedSearches.length ? '\nRelated searches (use as LSI keywords): '+paa.relatedSearches.join(', ') : '') : '';
 
-    var trendsCtx = trends.relatedQueries.length > 0
-      ? "\n\nGOOGLE TRENDS RISING QUERIES (use as LSI keywords and H3 ideas):\n" + trends.relatedQueries.join(", ") : "";
+    const trendsCtx = trends.relatedQueries.length > 0
+      ? '\n\nGOOGLE TRENDS RISING QUERIES (use as LSI keywords and H3 subheadings):\n'+trends.relatedQueries.join(', ') : '';
 
-    var videosCtx = videos.videos.length > 0
-      ? "\n\nYOUTUBE VIDEOS TO REFERENCE:\n"
-        + videos.videos.map(function(v,i){return (i+1)+". \""+v.title+"\" by "+v.channel+" — "+v.link;}).join("\n") : "";
+    const videosCtx = videos.videos.length > 0
+      ? '\n\nYOUTUBE VIDEOS TO REFERENCE IN ARTICLE:\n'
+        + videos.videos.map(function(v,i){return (i+1)+'. "'+v.title+'" by '+v.channel+' — '+v.link;}).join('\n') : '';
 
-    var aiCtx = (aiOverview.featuredSnippet||aiOverview.overview)
-      ? "\n\nGOOGLE AI OVERVIEW (write a better, more detailed answer than this):\n"
-        + (aiOverview.featuredSnippet||aiOverview.overview).slice(0,400) : "";
+    const impactCtx = (impactProducts&&impactProducts.products&&impactProducts.products.length > 0)
+      ? '\n\nIMPACT.COM LIVE PRODUCTS WITH REAL TRACKING LINKS (use trackingLink as the href for affiliate CTAs):\n'
+        + impactProducts.products.map(function(p,i){
+            var price = p.salePrice ? 'SALE '+p.salePrice+' (was '+p.price+')' : p.price;
+            return (i+1)+'. '+p.brand+' '+p.name+(price?' — '+price:'')+(p.inStock?' [In Stock]':'')+' — '+p.trackingLink;
+          }).join('\n')
+        + '\nCRITICAL: Use these exact tracking links in affiliate CTAs — they are pre-tracked Impact.com links.' : '';
+
+    const aiCtx = (aiOverview.featuredSnippet||aiOverview.overview)
+      ? '\n\nGOOGLE AI OVERVIEW (your article must answer this better and with more depth):\n'
+        + (aiOverview.featuredSnippet||aiOverview.overview).slice(0,400) : '';
 
     const systemPrompt = 'You are an expert sports affiliate content writer for BestSportsMag.com. '
       + 'You write SEO-optimised affiliate articles that rank on Google AND convert readers into buyers. '
@@ -474,21 +684,20 @@ app.post('/generate', async (req, res) => {
 
     const wc = parseInt(wordCount) || 2000;
     const numSects = wc <= 1500 ? 5 : wc <= 2000 ? 7 : wc <= 2500 ? 9 : 11;
-
-    // Extract number from keyword e.g. "15 Best Football Boots" -> 15
-    const numMatch = keyword.match(/^(d+)s+/);
+    const numMatch = keyword.match(/^(\d+)\s+/);
     const productCount = numMatch ? parseInt(numMatch[1]) : (articleType === 'best-list' ? 5 : 3);
-    const cleanKeyword = numMatch ? keyword.replace(/^d+s+/, '').trim() : keyword;
+    const cleanKeyword = numMatch ? keyword.replace(/^\d+\s+/,'').trim() : keyword;
 
     const userPrompt = 'Write a COMPLETE, LONG-FORM ' + wc + '-word SEO affiliate article. '
       + 'CRITICAL REQUIREMENT: You must write at least ' + wc + ' words of body content. '
       + 'Every H2 section needs 3-5 full paragraphs (100+ words each). Do not truncate or summarise. Write everything out fully.\n\n'
       + 'TARGET KEYWORD: "' + keyword + '"\n'
       + 'ARTICLE TYPE: ' + (typeMap[articleType] || typeMap['best-list']) + '\n'
+      + 'NUMBER OF PRODUCTS: ' + productCount + ' — LIST EXACTLY ' + productCount + ' products with real model names and prices.\n'
       + 'AFFILIATE NETWORK: ' + (affiliateNetwork||'Amazon Associates + Impact.com') + '\n'
       + 'TARGET AUDIENCE: ' + (targetAudience||'global sports fans') + '\n'
       + brandsCtx + '\n\n'
-      + serpContext + lllmCtx + gapsCtx + shoppingCtx + amazonCtx + newsCtx + paaCtx + trendsCtx + videosCtx + aiCtx + '\n\n'
+      + serpContext + lllmCtx + gapsCtx + shoppingCtx + amazonCtx + impactCtx + newsCtx + paaCtx + trendsCtx + videosCtx + aiCtx + '\n\n'
       + 'OUTPUT FORMAT — follow exactly:\n\n'
       + 'TITLE: [Under 60 chars, keyword first, include a number or power word]\n\n'
       + 'SLUG: [Lowercase hyphens only, max 6 words, include main keyword]\n\n'
