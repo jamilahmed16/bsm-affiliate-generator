@@ -9,7 +9,7 @@ app.use(cors({ origin:'*', methods:['POST','GET','OPTIONS'], allowedHeaders:['Co
 app.use(express.json({ limit:'10mb' }));
 
 app.get('/', (req, res) => {
-  res.json({ status:'BSM Affiliate Article Generator running', version:'1.4.1' });
+  res.json({ status:'BSM Affiliate Article Generator running', version:'1.5.0' });
 });
 
 /* ================================================================
@@ -205,42 +205,51 @@ function buildComparisonTable(products) {
 }
 
 function buildFaqHtml(faqItems) {
-  if (!faqItems || !faqItems.length) return '';
+  if (!faqItems || !faqItems.length) return "";
   var showItems = faqItems.slice(0, 6);
-  var itemsHtml = showItems.map(function(item) {
-    return '<div itemscope itemprop="mainEntity" itemtype="https://schema.org/Question" style="border-bottom:1px solid #2E2E2E;">'
-      + '<div style="padding:16px 20px;background:#111111;">'
-      + '<strong style="font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;text-transform:uppercase;color:#E8FF00;display:block;margin-bottom:10px;" itemprop="name">' + escHtml(item.q) + '</strong>'
-      + '<div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">'
-      + '<div itemprop="text" style="font-family:'Lora',serif;font-size:15px;color:#C8C8C8;line-height:1.75;">' + escHtml(item.a) + '</div>'
-      + '</div></div></div>';
-  }).join('');
 
-  // JSON-LD FAQPage schema — Google rich results + AI search engines
+  // Build HTML items
+  var itemsHtml = showItems.map(function(item) {
+    var q = (item.q||"").replace(/\*\*/g,"").trim();
+    var a = (item.a||"").replace(/\*\*/g,"").trim();
+    return [
+      '<div itemscope itemprop="mainEntity" itemtype="https://schema.org/Question" style="border-bottom:1px solid #2E2E2E;">',
+      '<div style="padding:16px 20px;background:#111111;">',
+      '<strong style="font-family:var(--bsm-font-d,sans-serif);font-size:17px;font-weight:700;text-transform:uppercase;color:#E8FF00;display:block;margin-bottom:10px;" itemprop="name">' + escHtml(q) + '</strong>',
+      '<div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">',
+      '<div itemprop="text" style="font-family:serif;font-size:15px;color:#C8C8C8;line-height:1.75;">' + escHtml(a) + '</div>',
+      '</div></div></div>'
+    ].join("");
+  }).join("");
+
+  // JSON-LD schema for Google rich results and AI search
   var schemaData = {
-    '@context': 'https://schema.org',
-    '@type': 'FAQPage',
-    'mainEntity': showItems.map(function(item) {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": showItems.map(function(item) {
       return {
-        '@type': 'Question',
-        'name': item.q,
-        'acceptedAnswer': { '@type': 'Answer', 'text': item.a }
+        "@type": "Question",
+        "name": (item.q||"").replace(/\*\*/g,"").trim(),
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": (item.a||"").replace(/\*\*/g,"").trim()
+        }
       };
     })
   };
   var jsonLd = '<script type="application/ld+json">' + JSON.stringify(schemaData) + '<\/script>';
 
-  // Speakable schema — voice search, Google Assistant, AI answer engines
+  // Speakable schema for voice and AI assistants
   var speakableData = {
-    '@context': 'https://schema.org',
-    '@type': 'WebPage',
-    'speakable': { '@type': 'SpeakableSpecification', 'cssSelector': ['.bsm-faq-wrap'] }
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "speakable": { "@type": "SpeakableSpecification", "cssSelector": [".bsm-faq-wrap"] }
   };
   var speakable = '<script type="application/ld+json">' + JSON.stringify(speakableData) + '<\/script>';
 
-  return '\n' + jsonLd + speakable
+  return "\n" + jsonLd + speakable
     + '<div class="bsm-faq-wrap" itemscope itemtype="https://schema.org/FAQPage" style="max-width:720px;margin:40px 0;border:1px solid #2E2E2E;overflow:hidden;">'
-    + '<div style="font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;text-transform:uppercase;color:#FFFFFF;padding:16px 20px;background:#1A1A1A;border-bottom:2px solid #E8FF00;">Frequently Asked Questions</div>'
+    + '<div style="font-size:22px;font-weight:800;text-transform:uppercase;color:#FFFFFF;padding:16px 20px;background:#1A1A1A;border-bottom:2px solid #E8FF00;">Frequently Asked Questions</div>'
     + itemsHtml + '</div>\n';
 }
 
@@ -279,7 +288,7 @@ function buildAffiliateHtml(parsed) {
 
   body = disclosure + body;
 
-  return '<!-- BSM Affiliate Content v1.4 -->\n<div class="bsm-affiliate-content">\n'
+  return '<!-- BSM Affiliate Content v1.0 -->\n<div class="bsm-affiliate-content">\n'
     + body + '\n'
     + buildFaqHtml(faq)
     + '\n</div>';
@@ -311,7 +320,7 @@ function parseAffiliateArticle(rawText) {
       if (aIdx === -1) return;
       let q = chunk.slice(0,aIdx).replace(/\*\*/g,'').replace(/^[:\s]+/,'').trim();
       let a = chunk.slice(aIdx).replace(/^\*\*A:\*\*/i,'').replace(/\*\*Q:[\s\S]*/i,'').replace(/\*\*/g,'').trim().replace(/\n/g,' ').replace(/\s+/g,' ');
-      q = q.replace(/\*\*/g,'').trim(); a = a.replace(/\*\*/g,'').trim(); if (q && a && q.length > 3) result.faq.push({q, a});
+      q=q.replace(/\*\*/g,'').trim(); a=a.replace(/\*\*/g,'').trim(); if (q && a && q.length > 3) result.faq.push({q, a});
     });
   }
 
@@ -389,7 +398,7 @@ app.post('/generate', async (req, res) => {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error:'API key not set' });
 
-    // ── Parallel API calls — SERP + Shopping + News + PAA ──
+    // ── All API calls in parallel ──
     console.log('Running all API lookups for: ' + keyword);
     const [serp, shopping, news, paa, trends, videos, aiOverview, amazon] = await Promise.all([
       analyseSERP(keyword),
@@ -401,55 +410,6 @@ app.post('/generate', async (req, res) => {
       getAIOverview(keyword),
       getAmazonData(keyword)
     ]);
-    console.log('All APIs done — SERP:' + serp.resultsCount
-      + ' Shopping:' + shopping.products.length
-      + ' Amazon:' + amazon.products.length
-      + ' News:' + news.news.length
-      + ' PAA:' + paa.questions.length
-      + ' Trends:' + trends.trends.length
-      + ' Videos:' + videos.videos.length
-      + ' AIOverview:' + (aiOverview.overview ? 'yes' : 'no'));
-
-    // ── Trends context ──
-    const trendsCtx = trends.relatedQueries.length > 0
-      ? '\n\nGOOGLE TRENDS RISING QUERIES (use these as LSI keywords and H2 topics):\n'
-        + trends.relatedQueries.join(', ')
-        + (trends.trends.length > 0
-            ? '\nTrend direction: ' + (trends.trends[trends.trends.length-1].value > trends.trends[0].value ? '📈 Rising' : '📉 Declining')
-            : '')
-      : '';
-
-    // ── Videos context — embed suggestions ──
-    const videosCtx = videos.videos.length > 0
-      ? '\n\nRELEVANT YOUTUBE VIDEOS TO REFERENCE (mention these in the article as supporting resources):\n'
-        + videos.videos.map(function(v, i) {
-            return (i+1) + '. "' + v.title + '" by ' + v.channel
-              + (v.views ? ' — ' + v.views + ' views' : '')
-              + '\n   Embed: ' + v.link;
-          }).join('\n')
-      : '';
-
-    // ── AI Overview context — understand what AI says, write better ──
-    const aiCtx = (aiOverview.overview || aiOverview.featuredSnippet)
-      ? '\n\nGOOGLE AI OVERVIEW / FEATURED SNIPPET (your article must be more comprehensive than this):\n'
-        + (aiOverview.featuredSnippet ? 'Featured Snippet: ' + aiOverview.featuredSnippet + '\n' : '')
-        + (aiOverview.overview ? 'AI Overview: ' + aiOverview.overview : '')
-        + '\nIMPORTANT: Your article must directly answer this in the opening and provide significantly more depth.'
-      : '';
-
-    // ── Amazon context — real Amazon prices and bestsellers ──
-    const amazonCtx = amazon.products.length > 0
-      ? '\n\nAMAZON BESTSELLERS WITH REAL PRICES (use for Amazon Associates links and price data):\n'
-        + amazon.products.map(function(p, i) {
-            return (i+1) + '. ' + p.title
-              + (p.price ? ' — ' + p.price : '')
-              + (p.rating ? ' — ' + p.rating + '★' : '')
-              + (p.reviews ? ' (' + p.reviews + ' reviews)' : '')
-              + (p.prime ? ' [Prime]' : '')
-              + (p.badge ? ' [' + p.badge + ']' : '');
-          }).join('\n')
-        + '\nUse these for Amazon Associates [AMAZON: Product — Price] placeholders.'
-      : '';
 
     // ── Build SEO-informed prompt ──
     const typeMap = {
@@ -475,39 +435,34 @@ app.post('/generate', async (req, res) => {
 
     const brandsCtx = brands ? '\nFEATURED BRANDS: ' + brands : '\nFEATURED BRANDS: Adidas, Nike, Puma, Oakley';
 
-    // ── Shopping context — real live prices ──
-    const shoppingCtx = shopping.products.length > 0
-      ? '\n\nLIVE PRODUCT PRICES FROM GOOGLE SHOPPING (use these EXACT prices in your article):\n'
-        + shopping.products.map(function(p, i) {
-            return (i+1) + '. ' + p.title
-              + (p.price ? ' — ' + p.price : '')
-              + (p.source ? ' — via ' + p.source : '')
-              + (p.rating ? ' — ' + p.rating + '★' : '')
-              + (p.reviews ? ' (' + p.reviews + ' reviews)' : '');
-          }).join('\n')
-        + '\nIMPORTANT: Use these real prices. Do not invent prices.'
-      : '';
+    var shoppingCtx = shopping.products.length > 0
+      ? "\n\nLIVE PRICES FROM GOOGLE SHOPPING (use these exact prices):\n"
+        + shopping.products.map(function(p,i){return (i+1)+". "+p.title+(p.price?" — "+p.price:"")+(p.source?" via "+p.source:"")+(p.rating?" "+p.rating+"★":"");}).join("\n")
+        + "\nIMPORTANT: Use these real prices. Do not invent prices." : "";
 
-    // ── News context — breaking hook ──
-    const newsCtx = news.news.length > 0
-      ? '\n\nLATEST NEWS HOOK (reference 1-2 of these in your opening to make the article timely):\n'
-        + news.news.map(function(n, i) {
-            return (i+1) + '. ' + n.title
-              + (n.source ? ' — ' + n.source : '')
-              + (n.date ? ' — ' + n.date : '');
-          }).join('\n')
-      : '';
+    var amazonCtx = amazon.products.length > 0
+      ? "\n\nAMAZON BESTSELLERS (use for Amazon Associates links):\n"
+        + amazon.products.map(function(p,i){return (i+1)+". "+p.title+(p.price?" — "+p.price:"")+(p.rating?" "+p.rating+"★":"")+(p.prime?" [Prime]":"");}).join("\n") : "";
 
-    // ── PAA context — real questions people search ──
-    const paaCtx = paa.questions.length > 0
-      ? '\n\nPEOPLE ALSO ASK — REAL GOOGLE QUESTIONS (use these as your FAQ questions EXACTLY as written):\n'
-        + paa.questions.map(function(q, i) {
-            return (i+1) + '. Q: ' + q.question
-              + (q.answer ? '\n   Existing answer hint: ' + q.answer.slice(0,200) : '');
-          }).join('\n')
-        + '\n\nRELATED SEARCHES (use as LSI keywords naturally in body text):\n'
-        + (paa.relatedSearches || []).join(', ')
-      : '';
+    var newsCtx = news.news.length > 0
+      ? "\n\nLATEST NEWS HOOK (reference 1-2 in your opening):\n"
+        + news.news.map(function(n,i){return (i+1)+". "+n.title+(n.source?" — "+n.source:"")+(n.date?" — "+n.date:"");}).join("\n") : "";
+
+    var paaCtx = paa.questions.length > 0
+      ? "\n\nPEOPLE ALSO ASK — use these as your 6 FAQ questions EXACTLY as written:\n"
+        + paa.questions.map(function(q,i){return (i+1)+". "+q.question+(q.answer?" (hint: "+q.answer.slice(0,150)+")" : "");}).join("\n")
+        + (paa.relatedSearches.length ? "\nRelated searches (use as LSI): "+paa.relatedSearches.join(", ") : "") : "";
+
+    var trendsCtx = trends.relatedQueries.length > 0
+      ? "\n\nGOOGLE TRENDS RISING QUERIES (use as LSI keywords and H3 ideas):\n" + trends.relatedQueries.join(", ") : "";
+
+    var videosCtx = videos.videos.length > 0
+      ? "\n\nYOUTUBE VIDEOS TO REFERENCE:\n"
+        + videos.videos.map(function(v,i){return (i+1)+". \""+v.title+"\" by "+v.channel+" — "+v.link;}).join("\n") : "";
+
+    var aiCtx = (aiOverview.featuredSnippet||aiOverview.overview)
+      ? "\n\nGOOGLE AI OVERVIEW (write a better, more detailed answer than this):\n"
+        + (aiOverview.featuredSnippet||aiOverview.overview).slice(0,400) : "";
 
     const systemPrompt = 'You are an expert sports affiliate content writer for BestSportsMag.com. '
       + 'You write SEO-optimised affiliate articles that rank on Google AND convert readers into buyers. '
@@ -520,74 +475,64 @@ app.post('/generate', async (req, res) => {
     const wc = parseInt(wordCount) || 2000;
     const numSects = wc <= 1500 ? 5 : wc <= 2000 ? 7 : wc <= 2500 ? 9 : 11;
 
-    // ── Extract product count from keyword e.g. '15 Best Football Boots' → 15 ──
-    const numMatch = keyword.match(/^(\d+)\s+/);  
+    // Extract number from keyword e.g. "15 Best Football Boots" -> 15
+    const numMatch = keyword.match(/^(d+)s+/);
     const productCount = numMatch ? parseInt(numMatch[1]) : (articleType === 'best-list' ? 5 : 3);
-    const cleanKeyword = numMatch ? keyword.replace(/^\d+\s+/,'').trim() : keyword;
+    const cleanKeyword = numMatch ? keyword.replace(/^d+s+/, '').trim() : keyword;
 
     const userPrompt = 'Write a COMPLETE, LONG-FORM ' + wc + '-word SEO affiliate article. '
-      + 'CRITICAL: You must write at least ' + wc + ' words. Every section needs 3-5 full paragraphs (100+ words each). Do not truncate or summarise.\n\n'
+      + 'CRITICAL REQUIREMENT: You must write at least ' + wc + ' words of body content. '
+      + 'Every H2 section needs 3-5 full paragraphs (100+ words each). Do not truncate or summarise. Write everything out fully.\n\n'
       + 'TARGET KEYWORD: "' + keyword + '"\n'
       + 'ARTICLE TYPE: ' + (typeMap[articleType] || typeMap['best-list']) + '\n'
-      + 'NUMBER OF PRODUCTS TO INCLUDE: ' + productCount + ' — YOU MUST LIST EXACTLY ' + productCount + ' PRODUCTS. Not more, not less.\n'
       + 'AFFILIATE NETWORK: ' + (affiliateNetwork||'Amazon Associates + Impact.com') + '\n'
       + 'TARGET AUDIENCE: ' + (targetAudience||'global sports fans') + '\n'
       + brandsCtx + '\n\n'
-      + serpContext + lllmCtx + gapsCtx
-      + shoppingCtx + amazonCtx + newsCtx
-      + paaCtx + trendsCtx + videosCtx + aiCtx + '\n\n'
+      + serpContext + lllmCtx + gapsCtx + shoppingCtx + amazonCtx + newsCtx + paaCtx + trendsCtx + videosCtx + aiCtx + '\n\n'
       + 'OUTPUT FORMAT — follow exactly:\n\n'
-      + 'TITLE: [Under 60 chars — use the exact keyword including the number if present, e.g. 15 Best Football Boots 2026]\n\n'
-      + 'SLUG: [Lowercase hyphens only, max 7 words, include number if present]\n\n'
+      + 'TITLE: [Under 60 chars, keyword first, include a number or power word]\n\n'
+      + 'SLUG: [Lowercase hyphens only, max 6 words, include main keyword]\n\n'
       + 'META: [Exactly 150-155 chars, keyword + specific benefit + soft CTA]\n\n'
       + 'PRODUCTS:\n'
-      + '- Brand | Full Product Name with Model |  | Pros: pro1, pro2, pro3 | 20-word description | Network\n'
-      + '[YOU MUST LIST EXACTLY ' + productCount + ' products here with real specific model names and prices. No more, no less.]\n\n'
+      + '- Brand | Full Product Name with Model Number | \ | Pros: pro1, pro2, pro3 | 20-word description | Network\n'
+      + '[List 3-5 real products with specific model names and estimated prices]\n\n'
       + 'CONTENT:\n'
-      + '[OPENING — 3 full paragraphs: hook, why this keyword matters in 2026, what article covers, price range anchor]\n\n'
-      + '## Why These Are The ' + productCount + ' Best ' + cleanKeyword + '\n'
-      + '[3 paragraphs — our testing methodology, criteria used to select these ' + productCount + ' picks, what separates them from the rest]\n\n'
-      + '## Quick Comparison: All ' + productCount + ' Picks at a Glance\n'
-      + '[2 paragraphs — brief overview comparing all ' + productCount + ' products before deep reviews, price range summary]\n\n'
-      + '## In-Depth Reviews: All ' + productCount + ' Picks\n'
-      + '[CRITICAL: Write a dedicated subsection for EACH of the ' + productCount + ' products. For every single product write: ### [Rank]. [Brand] [Model] — then 3 full paragraphs covering performance, specs, who it suits, real-world use, pros and cons.]\n\n'
-      + '## What to Look For When Buying ' + cleanKeyword + '\n'
-      + '[4 paragraphs: budget tiers, key specs to check, surface/use case guide, fit and sizing, what to avoid]\n\n'
-      + '## Best Budget Pick vs Best Premium Pick\n'
-      + '[3 paragraphs: budget recommendation with full reasoning, premium recommendation with full reasoning, who should choose each]\n\n'
-      + '## Where to Buy for the Best Price\n'
-      + '[2 paragraphs: Amazon vs Impact.com, shipping, returns, authenticity, timing for deals]\n\n'
-      + '## Common Mistakes to Avoid When Buying ' + cleanKeyword + '\n'
-      + '[3 paragraphs: top 5 mistakes buyers make, how to avoid each, specific cautionary examples]\n\n'
-      + (numSects >= 9 ? '## Expert Tips to Get the Most From Your Purchase\n[3 paragraphs: actionable expert advice on maintenance, performance optimisation, when to upgrade]\n\n' : '')
-      + '## Final Verdict: Our Top ' + productCount + ' Recommendations\n'
-      + '[3 paragraphs: summarise findings, name overall winner + runner-up + budget pick, strong call to action]\n\n'
+      + '[OPENING — 3 full paragraphs: hook reader, explain why this keyword matters, what the article covers, price anchor]\n\n'
+      + '## Why [Keyword] Matters in 2026\n'
+      + '[3 paragraphs — market trends, what changed this year, why this guide exists]\n\n'
+      + '## Quick Comparison: All ' + (articleType === 'best-list' ? 'Top Picks' : 'Options') + ' at a Glance\n'
+      + '[2 paragraphs — brief overview comparing all products before deep reviews]\n\n'
+      + '## In-Depth Reviews: Our Top ' + (articleType === 'best-list' ? '5' : '3') + ' Picks\n'
+      + '[For EACH product write 3 full paragraphs: performance review, technical specs breakdown, who it suits and why, real-world use cases, honest pros and cons in paragraph form]\n\n'
+      + '## [Question H2 — e.g. What Should You Look for in [Keyword]?]\n'
+      + '[4 paragraphs covering: budget tiers explained, key specs to check, surface or use-case guide, sizing and fit, what to avoid and why]\n\n'
+      + '## Best Value Pick vs Best Premium Pick\n'
+      + '[3 paragraphs: budget pick with full reasoning, premium pick with full reasoning, who should choose each one]\n\n'
+      + '## Where to Get the Best Price in 2026\n'
+      + '[2 paragraphs: Amazon vs Impact.com comparison, shipping timelines, return policies, authenticity tips, best time to buy]\n\n'
+      + '## Common Buying Mistakes to Avoid\n'
+      + '[3 paragraphs: top 4-5 mistakes buyers make in this category, how to avoid each, specific cautionary examples]\n\n'
+      + (numSects >= 9 ? '## Expert Tips to Get the Most From Your Purchase\n[3 paragraphs of actionable expert advice specific to this product category — maintenance, performance optimisation, when to upgrade]\n\n' : '')
+      + '## Final Verdict and Recommendation\n'
+      + '[3 paragraphs: summarise all findings, name the clear winner and why, runner-up pick, budget pick, strong call to action]\n\n'
       + '## Frequently Asked Questions\n'
-      + 'YOU MUST WRITE EXACTLY 6 FAQ ITEMS. Use the PEOPLE ALSO ASK questions from the data above as your FAQ questions — they are real Google searches. Each answer must be 3-4 sentences minimum.\n\n'
-      + '**Q:** What is the best ' + cleanKeyword + ' overall in 2026?\n'
-      + '**A:** [3-4 sentence answer naming the #1 pick, its price, key reason it wins, who it suits best]\n\n'
-      + '**Q:** What is the best budget ' + cleanKeyword + ' for the money?\n'
-      + '**A:** [3-4 sentence answer naming the best value pick, price, what you sacrifice vs premium, who it is for]\n\n'
-      + '**Q:** [Most searched People Also Ask question about ' + cleanKeyword + ']?\n'
-      + '**A:** [3-4 sentence direct answer with specific product names, prices, or data points]\n\n'
-      + '**Q:** Is ' + cleanKeyword + ' worth the money in 2026?\n'
-      + '**A:** [3-4 sentence honest verdict explaining value proposition, what you get at each price point]\n\n'
-      + '**Q:** [Fifth common buyer question about ' + cleanKeyword + ' — e.g. How long do they last? What size should I get?]?\n'
-      + '**A:** [3-4 sentence direct answer with specific practical advice]\n\n'
-      + '**Q:** [Sixth common buyer question — e.g. What is the difference between X and Y? Can beginners use them?]?\n'
-      + '**A:** [3-4 sentence direct answer with specific practical advice and a product recommendation]\n\n'
+      + '**Q:** What is the best ' + keyword + ' for the money in 2026?\n'
+      + '**A:** [3-sentence specific answer naming the exact product, its price, and precisely why it wins on value]\n\n'
+      + '**Q:** [Second most searched People Also Ask question about ' + keyword + ']?\n'
+      + '**A:** [3-sentence direct answer with specific data, product names, or prices where relevant]\n\n'
+      + '**Q:** Is ' + keyword + ' worth buying in 2026?\n'
+      + '**A:** [3-sentence honest verdict with a specific model recommendation and reasoning]\n\n'
+      + '**Q:** [Fourth common buyer question about ' + keyword + ']?\n'
+      + '**A:** [2-3 sentence direct answer]\n\n'
       + 'WRITING RULES — NON-NEGOTIABLE:\n'
-      + '- WORD COUNT: minimum ' + wc + ' words. Every section fully written. No truncating.\n'
-      + '- PRODUCT COUNT: exactly ' + productCount + ' products in the PRODUCTS block AND in the reviews section. Count them.\n'
-      + '- FAQ COUNT: exactly 6 FAQ items with **Q:** and **A:** format. Each answer 3-4 sentences minimum.\n'
-      + '- Every H2 section: minimum 3 paragraphs of 100+ words each.\n'
-      + '- Every product review: minimum 3 paragraphs with ### heading showing rank and model name.\n'
-      + '- Specific product model names and prices throughout — never generic.\n'
-      + '- Target keyword in: title, first 100 words, 3+ H2 headings, final verdict.\n'
-      + '- Price anchor in opening paragraph.\n'
-      + '- 2-3 internal links: [INTERNAL: related article topic]\n'
-      + '- 2-3 affiliate placeholders: [AFFILIATE: Product Name —  — Brand — Network]\n'
-      + '- End with strong conversion paragraph.';
+      + '- WORD COUNT: minimum ' + wc + ' words. Count before finishing. Every section must be fully written.\n'
+      + '- Every H2 section: minimum 3 paragraphs of 100+ words each — no exceptions\n'
+      + '- Specific product model names and real/estimated prices throughout — never say generic product\n'
+      + '- Target keyword in: title, first 100 words, 3+ H2 headings, final verdict\n'
+      + '- Price anchor in opening section — readers need to know cost range immediately\n'
+      + '- 2-3 internal link placeholders: [INTERNAL: related article topic]\n'
+      + '- 2-3 affiliate placeholders: [AFFILIATE: Product Name — \ — Brand — Network]\n'
+      + '- Conclusion must include a strong CTA encouraging purchase decision';
 
     // ── Call Claude ──
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -619,24 +564,6 @@ app.post('/generate', async (req, res) => {
         products:      parsed.products,
         faqCount:      parsed.faq.length,
         sectionCount:  parsed.sections.length,
-        dataEnrichment: {
-          shoppingProducts: shopping.products.length,
-          amazonProducts:   amazon.products.length,
-          newsStories:      news.news.length,
-          paaQuestions:     paa.questions.length,
-          trendingQueries:  trends.relatedQueries.length,
-          videosFound:      videos.videos.length,
-          aiOverviewFound:  !!(aiOverview.overview || aiOverview.featuredSnippet),
-          sources: {
-            shopping: shopping.source,
-            amazon:   amazon.source,
-            news:     news.source,
-            paa:      paa.source,
-            trends:   trends.source,
-            videos:   videos.source,
-            aiMode:   aiOverview.source
-          }
-        },
         serp: {
           intent:       serp.intent,
           source:       serp.source,
