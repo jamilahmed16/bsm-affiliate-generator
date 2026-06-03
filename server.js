@@ -9,7 +9,7 @@ app.use(cors({ origin:'*', methods:['POST','GET','OPTIONS'], allowedHeaders:['Co
 app.use(express.json({ limit:'10mb' }));
 
 app.get('/', (req, res) => {
-  res.json({ status:'BSM Affiliate Article Generator running', version:'1.2.0' });
+  res.json({ status:'BSM Affiliate Article Generator running', version:'1.4.0' });
 });
 
 /* ================================================================
@@ -389,9 +389,67 @@ app.post('/generate', async (req, res) => {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error:'API key not set' });
 
-    // ── SERP Analysis ──
-    console.log('Analysing SERP for: ' + keyword);
-    const serp = await analyseSERP(keyword);
+    // ── Parallel API calls — SERP + Shopping + News + PAA ──
+    console.log('Running all API lookups for: ' + keyword);
+    const [serp, shopping, news, paa, trends, videos, aiOverview, amazon] = await Promise.all([
+      analyseSERP(keyword),
+      getShoppingData(keyword),
+      getNewsData(keyword),
+      getPAAData(keyword),
+      getTrendsData(keyword),
+      getVideosData(keyword),
+      getAIOverview(keyword),
+      getAmazonData(keyword)
+    ]);
+    console.log('All APIs done — SERP:' + serp.resultsCount
+      + ' Shopping:' + shopping.products.length
+      + ' Amazon:' + amazon.products.length
+      + ' News:' + news.news.length
+      + ' PAA:' + paa.questions.length
+      + ' Trends:' + trends.trends.length
+      + ' Videos:' + videos.videos.length
+      + ' AIOverview:' + (aiOverview.overview ? 'yes' : 'no'));
+
+    // ── Trends context ──
+    const trendsCtx = trends.relatedQueries.length > 0
+      ? '\n\nGOOGLE TRENDS RISING QUERIES (use these as LSI keywords and H2 topics):\n'
+        + trends.relatedQueries.join(', ')
+        + (trends.trends.length > 0
+            ? '\nTrend direction: ' + (trends.trends[trends.trends.length-1].value > trends.trends[0].value ? '📈 Rising' : '📉 Declining')
+            : '')
+      : '';
+
+    // ── Videos context — embed suggestions ──
+    const videosCtx = videos.videos.length > 0
+      ? '\n\nRELEVANT YOUTUBE VIDEOS TO REFERENCE (mention these in the article as supporting resources):\n'
+        + videos.videos.map(function(v, i) {
+            return (i+1) + '. "' + v.title + '" by ' + v.channel
+              + (v.views ? ' — ' + v.views + ' views' : '')
+              + '\n   Embed: ' + v.link;
+          }).join('\n')
+      : '';
+
+    // ── AI Overview context — understand what AI says, write better ──
+    const aiCtx = (aiOverview.overview || aiOverview.featuredSnippet)
+      ? '\n\nGOOGLE AI OVERVIEW / FEATURED SNIPPET (your article must be more comprehensive than this):\n'
+        + (aiOverview.featuredSnippet ? 'Featured Snippet: ' + aiOverview.featuredSnippet + '\n' : '')
+        + (aiOverview.overview ? 'AI Overview: ' + aiOverview.overview : '')
+        + '\nIMPORTANT: Your article must directly answer this in the opening and provide significantly more depth.'
+      : '';
+
+    // ── Amazon context — real Amazon prices and bestsellers ──
+    const amazonCtx = amazon.products.length > 0
+      ? '\n\nAMAZON BESTSELLERS WITH REAL PRICES (use for Amazon Associates links and price data):\n'
+        + amazon.products.map(function(p, i) {
+            return (i+1) + '. ' + p.title
+              + (p.price ? ' — ' + p.price : '')
+              + (p.rating ? ' — ' + p.rating + '★' : '')
+              + (p.reviews ? ' (' + p.reviews + ' reviews)' : '')
+              + (p.prime ? ' [Prime]' : '')
+              + (p.badge ? ' [' + p.badge + ']' : '');
+          }).join('\n')
+        + '\nUse these for Amazon Associates [AMAZON: Product — Price] placeholders.'
+      : '';
 
     // ── Build SEO-informed prompt ──
     const typeMap = {
@@ -417,6 +475,40 @@ app.post('/generate', async (req, res) => {
 
     const brandsCtx = brands ? '\nFEATURED BRANDS: ' + brands : '\nFEATURED BRANDS: Adidas, Nike, Puma, Oakley';
 
+    // ── Shopping context — real live prices ──
+    const shoppingCtx = shopping.products.length > 0
+      ? '\n\nLIVE PRODUCT PRICES FROM GOOGLE SHOPPING (use these EXACT prices in your article):\n'
+        + shopping.products.map(function(p, i) {
+            return (i+1) + '. ' + p.title
+              + (p.price ? ' — ' + p.price : '')
+              + (p.source ? ' — via ' + p.source : '')
+              + (p.rating ? ' — ' + p.rating + '★' : '')
+              + (p.reviews ? ' (' + p.reviews + ' reviews)' : '');
+          }).join('\n')
+        + '\nIMPORTANT: Use these real prices. Do not invent prices.'
+      : '';
+
+    // ── News context — breaking hook ──
+    const newsCtx = news.news.length > 0
+      ? '\n\nLATEST NEWS HOOK (reference 1-2 of these in your opening to make the article timely):\n'
+        + news.news.map(function(n, i) {
+            return (i+1) + '. ' + n.title
+              + (n.source ? ' — ' + n.source : '')
+              + (n.date ? ' — ' + n.date : '');
+          }).join('\n')
+      : '';
+
+    // ── PAA context — real questions people search ──
+    const paaCtx = paa.questions.length > 0
+      ? '\n\nPEOPLE ALSO ASK — REAL GOOGLE QUESTIONS (use these as your FAQ questions EXACTLY as written):\n'
+        + paa.questions.map(function(q, i) {
+            return (i+1) + '. Q: ' + q.question
+              + (q.answer ? '\n   Existing answer hint: ' + q.answer.slice(0,200) : '');
+          }).join('\n')
+        + '\n\nRELATED SEARCHES (use as LSI keywords naturally in body text):\n'
+        + (paa.relatedSearches || []).join(', ')
+      : '';
+
     const systemPrompt = 'You are an expert sports affiliate content writer for BestSportsMag.com. '
       + 'You write SEO-optimised affiliate articles that rank on Google AND convert readers into buyers. '
       + 'Search intent for this keyword is: ' + serp.intent + '. '
@@ -441,7 +533,9 @@ app.post('/generate', async (req, res) => {
       + 'AFFILIATE NETWORK: ' + (affiliateNetwork||'Amazon Associates + Impact.com') + '\n'
       + 'TARGET AUDIENCE: ' + (targetAudience||'global sports fans') + '\n'
       + brandsCtx + '\n\n'
-      + serpContext + lllmCtx + gapsCtx + '\n\n'
+      + serpContext + lllmCtx + gapsCtx
+      + shoppingCtx + amazonCtx + newsCtx
+      + paaCtx + trendsCtx + videosCtx + aiCtx + '\n\n'
       + 'OUTPUT FORMAT — follow exactly:\n\n'
       + 'TITLE: [Under 60 chars — use the exact keyword including the number if present, e.g. 15 Best Football Boots 2026]\n\n'
       + 'SLUG: [Lowercase hyphens only, max 7 words, include number if present]\n\n'
@@ -469,7 +563,7 @@ app.post('/generate', async (req, res) => {
       + '## Final Verdict: Our Top ' + productCount + ' Recommendations\n'
       + '[3 paragraphs: summarise findings, name overall winner + runner-up + budget pick, strong call to action]\n\n'
       + '## Frequently Asked Questions\n'
-      + 'YOU MUST WRITE EXACTLY 6 FAQ ITEMS. Each answer must be 3-4 sentences minimum.\n\n'
+      + 'YOU MUST WRITE EXACTLY 6 FAQ ITEMS. Use the PEOPLE ALSO ASK questions from the data above as your FAQ questions — they are real Google searches. Each answer must be 3-4 sentences minimum.\n\n'
       + '**Q:** What is the best ' + cleanKeyword + ' overall in 2026?\n'
       + '**A:** [3-4 sentence answer naming the #1 pick, its price, key reason it wins, who it suits best]\n\n'
       + '**Q:** What is the best budget ' + cleanKeyword + ' for the money?\n'
@@ -525,6 +619,24 @@ app.post('/generate', async (req, res) => {
         products:      parsed.products,
         faqCount:      parsed.faq.length,
         sectionCount:  parsed.sections.length,
+        dataEnrichment: {
+          shoppingProducts: shopping.products.length,
+          amazonProducts:   amazon.products.length,
+          newsStories:      news.news.length,
+          paaQuestions:     paa.questions.length,
+          trendingQueries:  trends.relatedQueries.length,
+          videosFound:      videos.videos.length,
+          aiOverviewFound:  !!(aiOverview.overview || aiOverview.featuredSnippet),
+          sources: {
+            shopping: shopping.source,
+            amazon:   amazon.source,
+            news:     news.source,
+            paa:      paa.source,
+            trends:   trends.source,
+            videos:   videos.source,
+            aiMode:   aiOverview.source
+          }
+        },
         serp: {
           intent:       serp.intent,
           source:       serp.source,
