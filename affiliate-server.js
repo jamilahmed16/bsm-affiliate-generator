@@ -1,0 +1,488 @@
+const express = require('express');
+const cors    = require('cors');
+const fetch   = require('node-fetch');
+
+const app  = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors({ origin:'*', methods:['POST','GET','OPTIONS'], allowedHeaders:['Content-Type','Authorization'] }));
+app.use(express.json({ limit:'10mb' }));
+
+app.get('/', (req, res) => {
+  res.json({ status:'BSM Affiliate Article Generator running', version:'1.0.0' });
+});
+
+/* ================================================================
+   STEP 1 — SERP ANALYSIS
+   Brave Web Search → top 10 results for keyword
+   Brave LLM Context → what competitors are covering
+   Returns: intent, top URLs, content gaps, avg word count signal
+   ================================================================ */
+
+async function analyseSERP(keyword) {
+  const braveKey = process.env.BRAVE_API_KEY;
+  const serpKey  = process.env.SERP_API_KEY;
+
+  let webResults = [];
+  let lllmContext = '';
+  let source = 'none';
+
+  // ── Brave Web Search ──
+  if (braveKey) {
+    try {
+      const r = await fetch(
+        'https://api.search.brave.com/res/v1/web/search?q='
+        + encodeURIComponent(keyword)
+        + '&count=10&search_lang=en&country=us',
+        { headers: { 'Accept':'application/json', 'Accept-Encoding':'gzip', 'X-Subscription-Token': braveKey } }
+      );
+      const d = await r.json();
+      webResults = ((d.web && d.web.results) || []).slice(0, 10).map(function(item) {
+        return {
+          title:       item.title || '',
+          url:         item.url   || '',
+          description: item.description || '',
+          age:         item.age   || ''
+        };
+      });
+      source = 'Brave';
+      console.log('SERP via Brave: ' + webResults.length + ' results for: ' + keyword);
+    } catch(e) { console.log('Brave SERP failed: ' + e.message); }
+
+    // ── Brave LLM Context endpoint ──
+    try {
+      const r2 = await fetch(
+        'https://api.search.brave.com/res/v1/llm/context?q='
+        + encodeURIComponent(keyword)
+        + '&count=5',
+        { headers: { 'Accept':'application/json', 'Accept-Encoding':'gzip', 'X-Subscription-Token': braveKey } }
+      );
+      const d2 = await r2.json();
+      // LLM context returns structured content chunks
+      if (d2.context && d2.context.length > 0) {
+        lllmContext = d2.context.slice(0,5).map(function(c, i) {
+          return 'Context ' + (i+1) + ': ' + (c.title||'') + '\n' + (c.content||c.description||'');
+        }).join('\n\n');
+      }
+      console.log('Brave LLM Context: retrieved for: ' + keyword);
+    } catch(e) { console.log('Brave LLM Context failed: ' + e.message); }
+  }
+
+  // ── SerpAPI fallback ──
+  if (!webResults.length && serpKey) {
+    try {
+      const r = await fetch(
+        'https://serpapi.com/search.json?engine=google&q='
+        + encodeURIComponent(keyword)
+        + '&num=10&gl=us&hl=en&api_key=' + serpKey
+      );
+      const d = await r.json();
+      webResults = (d.organic_results||[]).slice(0,10).map(function(item) {
+        return { title:item.title||'', url:item.link||'', description:item.snippet||'', age:item.date||'' };
+      });
+
+      // SerpAPI People Also Ask
+      if (d.related_questions && d.related_questions.length > 0) {
+        lllmContext += '\n\nPEOPLE ALSO ASK:\n' + d.related_questions.slice(0,5).map(function(q) {
+          return '- ' + q.question + (q.answer ? '\n  Answer: ' + q.answer.slice(0,200) : '');
+        }).join('\n');
+      }
+
+      // SerpAPI Related Searches
+      if (d.related_searches && d.related_searches.length > 0) {
+        lllmContext += '\n\nRELATED SEARCHES:\n' + d.related_searches.slice(0,8).map(function(s) {
+          return '- ' + s.query;
+        }).join('\n');
+      }
+
+      source = 'SerpAPI';
+      console.log('SERP via SerpAPI: ' + webResults.length + ' results for: ' + keyword);
+    } catch(e) { console.log('SerpAPI SERP failed: ' + e.message); }
+  }
+
+  // ── Classify search intent ──
+  const kw = keyword.toLowerCase();
+  let intent = 'informational';
+  if (kw.match(/best|top|review|vs|compare|buy|cheap|price|deal|worth|recommend/)) intent = 'commercial';
+  if (kw.match(/buy|purchase|order|shop|discount|coupon|sale/)) intent = 'transactional';
+  if (kw.match(/how to|guide|tutorial|tips|ways|steps|beginners/)) intent = 'informational';
+
+  // ── Identify content gaps from descriptions ──
+  const allDescriptions = webResults.map(r => r.description).join(' ').toLowerCase();
+  const possibleAngles = [
+    { angle:'Price comparison table', present: allDescriptions.includes('price') || allDescriptions.includes('cost') },
+    { angle:'Pros and cons list',     present: allDescriptions.includes('pros') || allDescriptions.includes('cons') },
+    { angle:'Video embeds',           present: allDescriptions.includes('video') },
+    { angle:'Size/fit guide',         present: allDescriptions.includes('size') || allDescriptions.includes('fit') },
+    { angle:'Expert quotes',          present: allDescriptions.includes('expert') || allDescriptions.includes('according') },
+    { angle:'FAQ schema section',     present: allDescriptions.includes('faq') || allDescriptions.includes('question') },
+    { angle:'Buyer\'s guide section', present: allDescriptions.includes('guide') || allDescriptions.includes('how to choose') },
+    { angle:'Amazon vs other retailers', present: allDescriptions.includes('amazon') },
+  ];
+  const gaps = possibleAngles.filter(a => !a.present).map(a => a.angle);
+
+  return {
+    keyword,
+    intent,
+    source,
+    resultsCount: webResults.length,
+    topResults: webResults,
+    lllmContext,
+    gaps,
+    topTitles: webResults.slice(0,5).map(r => r.title),
+    topURLs:   webResults.slice(0,5).map(r => r.url)
+  };
+}
+
+/* ================================================================
+   STEP 2 — AFFILIATE HTML BUILDER
+   Outputs full BSM-styled affiliate article HTML
+   Includes: comparison table, product cards, FAQ schema,
+   affiliate CTA buttons, pros/cons, buyer's guide
+   ================================================================ */
+
+function escHtml(str) {
+  return (str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function buildProductCard(product, index) {
+  const badge = index === 0 ? '<div style="background:#E8FF00;color:#000;font-family:\'DM Mono\',monospace;font-size:9px;font-weight:700;letter-spacing:.2em;padding:4px 10px;text-transform:uppercase;display:inline-block;margin-bottom:10px;">⭐ Editor\'s Choice</div>' : '';
+  const stars = '★'.repeat(Math.min(5, Math.max(3, 5 - index)));
+
+  return '<div style="background:#111111;border:1px solid ' + (index===0?'#E8FF00':'#2E2E2E') + ';border-top:3px solid ' + (index===0?'#E8FF00':'#2E2E2E') + ';padding:24px;margin:20px 0;">'
+    + badge
+    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px;">'
+    + '<div style="flex:1;min-width:200px;">'
+    + '<div style="font-family:\'DM Mono\',monospace;font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:#E8FF00;margin-bottom:6px;">' + escHtml(product.brand) + '</div>'
+    + '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:24px;font-weight:800;text-transform:uppercase;color:#FFFFFF;line-height:1;margin-bottom:8px;">' + escHtml(product.name) + '</div>'
+    + '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#FFD700;margin-bottom:8px;">' + stars + '</div>'
+    + '<div style="font-family:\'Lora\',serif;font-size:15px;color:#C8C8C8;line-height:1.7;margin-bottom:12px;">' + escHtml(product.description) + '</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">'
+    + (product.pros||[]).slice(0,3).map(function(p) {
+        return '<span style="font-family:\'DM Mono\',monospace;font-size:10px;background:#002200;color:#00cc66;padding:3px 8px;border:1px solid #004400;">✓ ' + escHtml(p) + '</span>';
+      }).join('')
+    + '</div>'
+    + '</div>'
+    + '<div style="text-align:center;flex-shrink:0;">'
+    + '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:36px;font-weight:900;color:#FFFFFF;line-height:1;">' + escHtml(product.price) + '</div>'
+    + '<div style="font-family:\'DM Mono\',monospace;font-size:9px;color:#555555;margin-bottom:12px;">' + escHtml(product.network||'via Impact.com') + '</div>'
+    + '<a href="' + escHtml(product.affiliateUrl||'#') + '" style="display:block;background:#E8FF00;color:#000000;font-family:\'Barlow Condensed\',sans-serif;font-weight:700;font-size:16px;letter-spacing:.1em;text-transform:uppercase;padding:12px 24px;text-decoration:none;margin-bottom:6px;" target="_blank" rel="noopener sponsored">Buy Now &rarr;</a>'
+    + '<div style="font-family:\'DM Mono\',monospace;font-size:8px;color:#444444;">*Affiliate link</div>'
+    + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+function buildComparisonTable(products) {
+  if (!products || products.length < 2) return '';
+  const rows = products.map(function(p, i) {
+    return '<tr style="background:' + (i%2===0?'#111111':'#0d0d0d') + ';">'
+      + '<td style="padding:12px 16px;font-family:\'Barlow Condensed\',sans-serif;font-size:16px;font-weight:700;text-transform:uppercase;color:#FFFFFF;border-right:1px solid #2E2E2E;">'
+      + (i===0?'<span style="color:#E8FF00;">⭐ </span>':'') + escHtml(p.brand) + ' ' + escHtml(p.name)
+      + '</td>'
+      + '<td style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:13px;color:#E8FF00;font-weight:700;border-right:1px solid #2E2E2E;">' + escHtml(p.price) + '</td>'
+      + '<td style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:11px;color:#FFD700;">' + '★'.repeat(Math.min(5,Math.max(3,5-i))) + '</td>'
+      + '<td style="padding:12px 16px;font-family:\'Lora\',serif;font-size:13px;color:#C8C8C8;">' + escHtml((p.pros||[])[0]||'') + '</td>'
+      + '<td style="padding:12px 16px;text-align:center;">'
+      + '<a href="' + escHtml(p.affiliateUrl||'#') + '" style="background:#E8FF00;color:#000;font-family:\'Barlow Condensed\',sans-serif;font-weight:700;font-size:13px;letter-spacing:.1em;text-transform:uppercase;padding:8px 16px;text-decoration:none;" target="_blank" rel="noopener sponsored">Buy &rarr;</a>'
+      + '</td>'
+      + '</tr>';
+  }).join('');
+
+  return '<div style="margin:36px 0;max-width:100%;overflow-x:auto;">'
+    + '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:22px;font-weight:800;text-transform:uppercase;color:#FFFFFF;padding:16px 20px;background:#1A1A1A;border-top:3px solid #E8FF00;border:1px solid #2E2E2E;border-bottom:none;">Quick Comparison</div>'
+    + '<table style="width:100%;border-collapse:collapse;border:1px solid #2E2E2E;">'
+    + '<thead><tr style="background:#1A1A1A;">'
+    + '<th style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#E8FF00;text-align:left;border-right:1px solid #2E2E2E;">Product</th>'
+    + '<th style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#E8FF00;text-align:left;border-right:1px solid #2E2E2E;">Price</th>'
+    + '<th style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#E8FF00;text-align:left;border-right:1px solid #2E2E2E;">Rating</th>'
+    + '<th style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#E8FF00;text-align:left;border-right:1px solid #2E2E2E;">Best For</th>'
+    + '<th style="padding:12px 16px;font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#E8FF00;text-align:center;">Buy</th>'
+    + '</tr></thead>'
+    + '<tbody>' + rows + '</tbody>'
+    + '</table>'
+    + '</div>';
+}
+
+function buildFaqHtml(faqItems) {
+  if (!faqItems || !faqItems.length) return '';
+  const items = faqItems.map(function(item) {
+    return '<div itemscope itemprop="mainEntity" itemtype="https://schema.org/Question" style="border-bottom:1px solid #2E2E2E;">'
+      + '<div style="padding:16px 20px;background:#111111;">'
+      + '<strong style="font-family:\'Barlow Condensed\',sans-serif;font-size:17px;font-weight:700;text-transform:uppercase;color:#E8FF00;display:block;margin-bottom:10px;" itemprop="name">' + escHtml(item.q) + '</strong>'
+      + '<div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">'
+      + '<span itemprop="text" style="font-family:\'Lora\',serif;font-size:15px;color:#C8C8C8;line-height:1.75;">' + escHtml(item.a) + '</span>'
+      + '</div></div></div>';
+  }).join('');
+  return '<div itemscope itemtype="https://schema.org/FAQPage" style="max-width:100%;margin:40px 0;border:1px solid #2E2E2E;overflow:hidden;">'
+    + '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:22px;font-weight:800;text-transform:uppercase;color:#FFFFFF;padding:16px 20px;background:#1A1A1A;border-bottom:2px solid #E8FF00;">Frequently Asked Questions</div>'
+    + items + '</div>';
+}
+
+function buildAffiliateHtml(parsed) {
+  const { sections, faq, products } = parsed;
+  let body = '';
+
+  // Comparison table first (high converting)
+  if (products && products.length > 1) {
+    body += buildComparisonTable(products);
+  }
+
+  sections.forEach(function(s, i) {
+    if (i === 0) {
+      body += s.paragraphs.map(p => '<p style="font-family:\'Lora\',serif;font-size:17px;line-height:1.85;color:#C8C8C8;margin-bottom:22px;">' + p + '</p>').join('\n');
+
+      // Mid-article ad
+      body += '\n<div style="background:#111111;border:1px dashed #2E2E2E;text-align:center;font-family:monospace;font-size:9px;color:#444;text-transform:uppercase;min-height:90px;line-height:90px;margin:32px 0;"><!-- ADSENSE: paste here --> Advertisement</div>\n';
+
+      // Product cards after intro
+      if (products && products.length > 0) {
+        body += '\n<h2 style="font-family:\'Barlow Condensed\',sans-serif;font-size:32px;font-weight:800;text-transform:uppercase;color:#FFFFFF;line-height:1;margin:40px 0 16px;padding-left:14px;border-left:3px solid #E8FF00;">Our Top Picks</h2>\n';
+        products.forEach(function(p, pi) { body += buildProductCard(p, pi); });
+      }
+
+    } else {
+      body += '\n<h2 style="font-family:\'Barlow Condensed\',sans-serif;font-size:32px;font-weight:800;text-transform:uppercase;color:#FFFFFF;line-height:1;margin:40px 0 16px;padding-left:14px;border-left:3px solid #E8FF00;">' + escHtml(s.heading) + '</h2>\n';
+      body += s.paragraphs.map(p => '<p style="font-family:\'Lora\',serif;font-size:17px;line-height:1.85;color:#C8C8C8;margin-bottom:22px;">' + p + '</p>').join('\n');
+    }
+  });
+
+  // Affiliate disclosure
+  const disclosure = '<div style="background:#1A1A1A;border:1px solid #2E2E2E;border-left:3px solid #555;padding:16px 20px;margin:32px 0;font-family:\'DM Mono\',monospace;font-size:10px;color:#555555;line-height:1.7;">'
+    + '<strong style="color:#888888;">AFFILIATE DISCLOSURE:</strong> BestSportsMag earns a commission from qualifying purchases made through links on this page via Amazon Associates and Impact.com partner programs. This comes at no extra cost to you and helps us keep the lights on.'
+    + '</div>';
+
+  body = disclosure + body;
+
+  return '<!-- BSM Affiliate Content v1.0 -->\n<div class="bsm-affiliate-content">\n'
+    + body + '\n'
+    + buildFaqHtml(faq)
+    + '\n</div>';
+}
+
+/* ================================================================
+   STEP 3 — ARTICLE PARSER
+   Extracts: title, slug, meta, sections, FAQ, products
+   ================================================================ */
+function parseAffiliateArticle(rawText) {
+  const result = { title:'', slug:'', meta:'', sections:[], faq:[], products:[] };
+
+  const tM = rawText.match(/TITLE:\s*(.+?)(?:\n|$)/);
+  const sM = rawText.match(/SLUG:\s*(.+?)(?:\n|$)/);
+  const mM = rawText.match(/META:\s*(.+?)(?:\n|$)/);
+  result.title = tM ? tM[1].trim() : '';
+  result.slug  = sM ? sM[1].trim().replace(/[^a-z0-9-]/g,'') : '';
+  result.meta  = mM ? mM[1].trim() : '';
+
+  const cM = rawText.match(/CONTENT:\s*([\s\S]+)/);
+  const content = cM ? cM[1].trim() : rawText;
+
+  // Extract FAQ
+  const faqBM = content.match(/##\s*(?:Frequently Asked Questions|FAQ)\s*([\s\S]+?)(?=\n##\s|$)/i);
+  if (faqBM) {
+    const chunks = faqBM[1].split(/\*\*Q:\*\*/i).filter(s=>s.trim());
+    chunks.forEach(function(chunk) {
+      const aIdx = chunk.search(/\*\*A:\*\*/i);
+      if (aIdx === -1) return;
+      let q = chunk.slice(0,aIdx).replace(/\*\*/g,'').replace(/^[:\s]+/,'').trim();
+      let a = chunk.slice(aIdx).replace(/^\*\*A:\*\*/i,'').replace(/\*\*Q:[\s\S]*/i,'').replace(/\*\*/g,'').trim().replace(/\n/g,' ').replace(/\s+/g,' ');
+      if (q && a && q.length > 3) result.faq.push({q, a});
+    });
+  }
+
+  // Extract products from PRODUCTS: block
+  const prodBM = rawText.match(/PRODUCTS:\s*([\s\S]+?)(?=\nCONTENT:|$)/i);
+  if (prodBM) {
+    const prodLines = prodBM[1].split('\n').filter(l=>l.trim().startsWith('-'));
+    prodLines.forEach(function(line, i) {
+      // Format: - Brand | Name | Price | Pros: x, y | Network
+      const parts = line.replace(/^-\s*/,'').split('|').map(p=>p.trim());
+      if (parts.length >= 3) {
+        const prosMatch = (parts[3]||'').replace(/^Pros?:\s*/i,'');
+        result.products.push({
+          brand:       parts[0] || 'Brand',
+          name:        parts[1] || 'Product',
+          price:       parts[2] || '$0',
+          pros:        prosMatch ? prosMatch.split(',').map(p=>p.trim()) : [],
+          description: parts[4] || '',
+          network:     parts[5] || 'via Impact.com',
+          affiliateUrl:'#'
+        });
+      }
+    });
+  }
+
+  // Remove FAQ from content
+  const noFaq = content.replace(/##\s*(?:Frequently Asked Questions|FAQ)[\s\S]+?(?=\n##\s|$)/i,'');
+
+  // Sections
+  noFaq.split(/^## /m).forEach(function(part, i) {
+    if (!part.trim()) return;
+    let heading='', text=part;
+    if (i > 0) {
+      const nl = part.indexOf('\n');
+      if (nl > -1) { heading=part.slice(0,nl).trim(); text=part.slice(nl+1); }
+      else { heading=part.trim(); text=''; }
+    }
+    text = text
+      .replace(/\[AFFILIATE:[^\]]+\]/gi,'').replace(/\[AMAZON:[^\]]+\]/gi,'')
+      .replace(/\[INTERNAL:\s*([^\]]+)\]/gi,'<a href="#" style="color:#E8FF00;text-decoration:underline;">$1</a>')
+      .replace(/\*\*(.+?)\*\*/g,'<strong style="color:#FFFFFF;font-weight:600;">$1</strong>')
+      .replace(/\*(.+?)\*/g,'<em>$1</em>');
+    const paragraphs = text.split(/\n\n+/).map(p=>p.trim()).filter(p=>p&&!p.startsWith('#')&&p.length>20).map(p=>p.replace(/\n/g,' '));
+    if (paragraphs.length > 0 || heading) result.sections.push({heading, paragraphs});
+  });
+
+  return result;
+}
+
+/* ================================================================
+   ENDPOINT 1 — /analyse
+   Returns SERP analysis for a keyword
+   Used by the frontend to show competitor data before generating
+   ================================================================ */
+app.post('/analyse', async (req, res) => {
+  try {
+    const { keyword } = req.body;
+    if (!keyword) return res.status(400).json({ error:'Missing keyword' });
+    const analysis = await analyseSERP(keyword);
+    res.json(analysis);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* ================================================================
+   ENDPOINT 2 — /generate
+   Full pipeline: SERP → Claude affiliate article → BSM HTML
+   ================================================================ */
+app.post('/generate', async (req, res) => {
+  try {
+    const { keyword, articleType, wordCount, affiliateNetwork, targetAudience, brands } = req.body;
+    if (!keyword) return res.status(400).json({ error:'Missing keyword' });
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error:'API key not set' });
+
+    // ── SERP Analysis ──
+    console.log('Analysing SERP for: ' + keyword);
+    const serp = await analyseSERP(keyword);
+
+    // ── Build SEO-informed prompt ──
+    const typeMap = {
+      'best-list':   'a "Best [Product]" roundup article ranking and reviewing 5-7 specific products with pros, cons, and buy links',
+      'review':      'a detailed single-product review covering specs, real-world performance, pros, cons, verdict, and who should buy',
+      'comparison':  'a head-to-head comparison of 2-3 specific products with a clear winner recommendation',
+      'buyers-guide':'a comprehensive buyer\'s guide helping readers choose the right product for their needs',
+      'deals':       'a deals and discounts article highlighting best current prices and where to buy'
+    };
+
+    const serpContext = serp.topResults.length > 0
+      ? 'CURRENT TOP 10 RANKING PAGES (analyse these to find gaps and write better content):\n\n'
+        + serp.topResults.map((r,i) => (i+1)+'. '+r.title+'\nURL: '+r.url+'\nSnippet: '+r.description).join('\n\n')
+      : '';
+
+    const lllmCtx = serp.lllmContext
+      ? '\n\nCURRENT CONTENT CONTEXT (what competitors are covering):\n' + serp.lllmContext
+      : '';
+
+    const gapsCtx = serp.gaps.length > 0
+      ? '\n\nCONTENT GAPS (what competitors are MISSING — include all of these):\n' + serp.gaps.map(g=>'- '+g).join('\n')
+      : '';
+
+    const brandsCtx = brands ? '\nFEATURED BRANDS: ' + brands : '\nFEATURED BRANDS: Adidas, Nike, Puma, Oakley';
+
+    const systemPrompt = 'You are an expert sports affiliate content writer for BestSportsMag.com. '
+      + 'You write SEO-optimised affiliate articles that rank on Google AND convert readers into buyers. '
+      + 'Search intent for this keyword is: ' + serp.intent + '. '
+      + 'You must analyse competitor content gaps and write something genuinely better. '
+      + 'Always include specific product names, real prices (estimate if unknown), and genuine buying advice. '
+      + 'Never use vague filler — every sentence must help the reader make a purchase decision. '
+      + 'Current date: ' + new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+
+    const userPrompt = 'Write a complete ' + (wordCount||2000) + '-word SEO affiliate article.\n\n'
+      + 'TARGET KEYWORD: "' + keyword + '"\n'
+      + 'ARTICLE TYPE: ' + (typeMap[articleType] || typeMap['best-list']) + '\n'
+      + 'AFFILIATE NETWORK: ' + (affiliateNetwork||'Amazon Associates + Impact.com') + '\n'
+      + 'TARGET AUDIENCE: ' + (targetAudience||'global sports fans') + '\n'
+      + brandsCtx + '\n\n'
+      + serpContext + lllmCtx + gapsCtx + '\n\n'
+      + 'OUTPUT FORMAT:\n\n'
+      + 'TITLE: [Under 60 chars, keyword first, include number or power word]\n\n'
+      + 'SLUG: [Lowercase hyphens, max 6 words, include main keyword]\n\n'
+      + 'META: [Exactly 150-155 chars, keyword + benefit + soft CTA]\n\n'
+      + 'PRODUCTS:\n'
+      + '- Brand | Product Name | Price | Pros: pro1, pro2, pro3 | One-line description | Network\n'
+      + '[List 3-5 products in this exact format]\n\n'
+      + 'CONTENT:\n'
+      + '[Opening paragraph — hook with the search intent, include keyword in first 100 words]\n\n'
+      + '## [H2 Heading with keyword variation]\n'
+      + '[2-3 paragraphs]\n\n'
+      + '## How to Choose: Buyer\'s Guide\n'
+      + '[What to look for — surfaces, fit, budget, level]\n\n'
+      + '## Are They Worth It? Our Verdict\n'
+      + '[Clear recommendation, who should buy which]\n\n'
+      + '## Where to Buy and Best Prices\n'
+      + '[Amazon vs Impact.com, shipping, returns]\n\n'
+      + '## Frequently Asked Questions\n'
+      + '**Q:** [Question 1 from People Also Ask or common buyer query]?\n'
+      + '**A:** [Direct answer, 2-3 sentences]\n\n'
+      + '**Q:** [Question 2]\n'
+      + '**A:** [Direct answer]\n\n'
+      + '**Q:** [Question 3]\n'
+      + '**A:** [Direct answer]\n\n'
+      + 'SEO RULES:\n'
+      + '- Keyword in title, first 100 words, 2+ H2 headings\n'
+      + '- Include specific product model names — never generic\n'
+      + '- One H2 must be a question for PAA targeting\n'
+      + '- Price anchoring — mention prices in opening section\n'
+      + '- Internal link placeholders: [INTERNAL: related article topic] x2\n'
+      + '- Affiliate CTA: [AFFILIATE: Product — $Price — Brand — Network] x2-3';
+
+    // ── Call Claude ──
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'x-api-key':apiKey, 'anthropic-version':'2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 5000,
+        system: systemPrompt,
+        messages: [{ role:'user', content:userPrompt }]
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error ? data.error.message : 'API error' });
+
+    const rawText = data.content[0].text;
+    const parsed  = parseAffiliateArticle(rawText);
+    const html    = buildAffiliateHtml(parsed);
+
+    res.json({
+      content: [{ type:'text', text:rawText }],
+      bsm: {
+        title:         parsed.title,
+        slug:          parsed.slug,
+        meta:          parsed.meta,
+        html:          html,
+        raw:           rawText,
+        products:      parsed.products,
+        faqCount:      parsed.faq.length,
+        sectionCount:  parsed.sections.length,
+        serp: {
+          intent:       serp.intent,
+          source:       serp.source,
+          resultsCount: serp.resultsCount,
+          topTitles:    serp.topTitles,
+          gaps:         serp.gaps
+        }
+      }
+    });
+
+  } catch(error) {
+    console.error('Affiliate generator error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(PORT, () => console.log('BSM Affiliate Generator v1.0 running on port ' + PORT));
