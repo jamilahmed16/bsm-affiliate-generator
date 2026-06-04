@@ -11,7 +11,7 @@ app.use(express.json({ limit:'10mb' }));
 app.get('/', (req, res) => {
   res.json({
     status:   'BSM Affiliate Generator — Full Stack',
-    version:  '2.0.1',
+    version:  '2.0.2',
     apis: {
       anthropic: process.env.ANTHROPIC_API_KEY ? 'connected' : 'missing',
       impact:    process.env.IMPACT_ACCOUNT_SID ? 'connected' : 'missing',
@@ -722,15 +722,39 @@ app.post('/generate', async (req, res) => {
     const wc = parseInt(wordCount) || 2000;
     const numSects = wc <= 1500 ? 5 : wc <= 2000 ? 7 : wc <= 2500 ? 9 : 11;
     const numMatch = keyword.match(/^(\d+)\s+/);
-    const productCount = numMatch ? parseInt(numMatch[1]) : (articleType === 'best-list' ? 5 : 3);
     const cleanKeyword = numMatch ? keyword.replace(/^\d+\s+/,'').trim() : keyword;
+
+    // ── Smart product count for best-list articles without a number in the keyword ──
+    function smartProductCount(kw) {
+      var k = kw.toLowerCase();
+
+      // Collectibles / cards
+      if (/topps|panini|hobby box|trading card|sports card|graded card|wax box|blaster|prizm/.test(k)) return 12;
+
+      // Single brand keywords — contains one brand name + category
+      var brands = ['nike','adidas','puma','oakley','new balance','mizuno','asics','garmin','under armour','fear of god','hummel','reusch','select'];
+      var brandMatches = brands.filter(function(b) { return k.includes(b); });
+      if (brandMatches.length === 1) return 8;
+
+      // Multi-brand or multi-category keywords
+      if (/best .+ boots 20|best .+ shoes 20|best .+ kit 20|best .+ gear 20|best .+ jersey|best .+ watch/.test(k)) return 15;
+
+      // Default
+      return 10;
+    }
+
+    var productCount = numMatch
+      ? parseInt(numMatch[1])
+      : (articleType === 'best-list' ? smartProductCount(keyword) : 3);
 
     const userPrompt = 'Write a COMPLETE, LONG-FORM ' + wc + '-word SEO affiliate article. '
       + 'CRITICAL REQUIREMENT: You must write at least ' + wc + ' words of body content. '
       + 'Every H2 section needs 3-5 full paragraphs (100+ words each). Do not truncate or summarise. Write everything out fully.\n\n'
       + 'TARGET KEYWORD: "' + keyword + '"\n'
       + 'ARTICLE TYPE: ' + (typeMap[articleType] || typeMap['best-list']) + '\n'
-      + 'NUMBER OF PRODUCTS: ' + productCount + ' — LIST EXACTLY ' + productCount + ' products with real model names and prices.\n'
+      + 'NUMBER OF PRODUCTS: ' + productCount + ' — LIST EXACTLY ' + productCount + ' products.\n'
+      + 'This is a smart count based on keyword type. For best-list articles: single-brand=8, collectibles=12, multi-category=15, default=10.\n'
+      + 'Do NOT list fewer products than instructed. Write a full dedicated review subsection for EVERY product.\n'
       + 'AFFILIATE NETWORK: ' + (affiliateNetwork||'Amazon Associates + Impact.com') + '\n'
       + 'TARGET AUDIENCE: ' + (targetAudience||'global sports fans') + '\n'
       + brandsCtx + '\n\n'
