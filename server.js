@@ -11,7 +11,7 @@ app.use(express.json({ limit:'10mb' }));
 app.get('/', (req, res) => {
   res.json({
     status:   'BSM Affiliate Generator — Full Stack',
-    version:  '2.0.0',
+    version:  '2.0.1',
     apis: {
       anthropic: process.env.ANTHROPIC_API_KEY ? 'connected' : 'missing',
       impact:    process.env.IMPACT_ACCOUNT_SID ? 'connected' : 'missing',
@@ -292,12 +292,40 @@ function buildAffiliateHtml(parsed) {
 function parseAffiliateArticle(rawText) {
   const result = { title:'', slug:'', meta:'', sections:[], faq:[], products:[] };
 
-  const tM = rawText.match(/TITLE:\s*(.+?)(?:\n|$)/);
-  const sM = rawText.match(/SLUG:\s*(.+?)(?:\n|$)/);
-  const mM = rawText.match(/META:\s*(.+?)(?:\n|$)/);
-  result.title = tM ? tM[1].trim().replace(/\*\*/g,'').trim() : '';
-  result.slug  = sM ? sM[1].trim().replace(/\*\*/g,'').replace(/[^a-z0-9-]/g,'') : '';
-  result.meta  = mM ? mM[1].trim().replace(/\*\*/g,'').trim() : '';
+  const tM = rawText.match(/TITLE:[\s]*(.+?)(?:\n|$)/);
+  const sM = rawText.match(/SLUG:[\s]*(.+?)(?:\n|$)/);
+  const mM = rawText.match(/META:[\s]*(.+?)(?:\n|$)/);
+
+  function cleanField(val) {
+    if (!val) return '';
+    return val.trim()
+      .replace(/\*\*/g, '')
+      .replace(/^\[|\]$/g, '')
+      .replace(/^#+\s*/, '')
+      .trim();
+  }
+
+  result.title = cleanField(tM ? tM[1] : '');
+  result.meta  = cleanField(mM ? mM[1] : '');
+
+  var rawSlug = cleanField(sM ? sM[1] : '');
+  result.slug = rawSlug
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+
+  if (!result.slug || result.slug.length < 3) {
+    result.slug = result.title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .slice(0, 80);
+  }
 
   const cM = rawText.match(/CONTENT:\s*([\s\S]+)/);
   const content = cM ? cM[1].trim() : rawText;
